@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Volatility Drag: Jensen's Inequality in Action</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'IBM Plex Sans', -apple-system, sans-serif; background: #fafafa; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useMemo } = React;
+
+    const VolatilityDragVisualization = () => {
+      const [sigma, setSigma] = useState(0.8);
+      
+      const calculations = useMemo(() => {
+        const kMinus = -sigma;
+        const kPlus = sigma;
+        const pMinus = Math.exp(kMinus);
+        const pPlus = Math.exp(kPlus);
+        const arithmeticMean = (pMinus + pPlus) / 2;
+        const geometricMean = Math.exp(0);
+        const volatilityDragPrice = arithmeticMean - geometricMean;
+        const theoreticalFactor = Math.exp((sigma * sigma) / 2);
+        const sigmaSquaredHalf = (sigma * sigma) / 2;
+        
+        return {
+          kMinus, kPlus, pMinus, pPlus,
+          arithmeticMean, geometricMean,
+          volatilityDragPrice, theoreticalFactor, sigmaSquaredHalf
+        };
+      }, [sigma]);
+
+      const width = 700;
+      const height = 500;
+      const margin = { top: 40, right: 60, bottom: 60, left: 70 };
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+
+      const kMin = -1.5;
+      const kMax = 1.5;
+      const pMin = 0;
+      const pMax = 5;
+
+      const scaleX = (k) => margin.left + ((k - kMin) / (kMax - kMin)) * plotWidth;
+      const scaleY = (p) => margin.top + plotHeight - ((p - pMin) / (pMax - pMin)) * plotHeight;
+
+      const curvePoints = useMemo(() => {
+        const points = [];
+        for (let k = kMin; k <= kMax; k += 0.02) {
+          points.push({ k, p: Math.exp(k) });
+        }
+        return points;
+      }, []);
+
+      const curvePath = curvePoints
+        .map((pt, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(pt.k)} ${scaleY(pt.p)}`)
+        .join(' ');
+
+      const { kMinus, kPlus, pMinus, pPlus, arithmeticMean, geometricMean, volatilityDragPrice, theoreticalFactor, sigmaSquaredHalf } = calculations;
+
+      return (
+        <div style={{ padding: '24px', minHeight: '100vh' }}>
+          <div style={{ maxWidth: '900px', margin: '0 auto' }}>
+            <h1 style={{
+              fontSize: '24px', fontWeight: 600, color: '#1a1a2e',
+              marginBottom: '8px', letterSpacing: '-0.5px'
+            }}>
+              Volatility Drag: Jensen's Inequality in Action
+            </h1>
+            
+            <p style={{ fontSize: '14px', color: '#666', marginBottom: '24px', lineHeight: 1.5 }}>
+              The vertical gap between the chord (arithmetic mean) and the curve (geometric mean) 
+              is the volatility drag — caused by the convexity of the exponential function.
+            </p>
+
+            {/* Sigma Slider */}
+            <div style={{
+              backgroundColor: 'white', borderRadius: '12px', padding: '20px 24px',
+              marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+                <label style={{ fontSize: '14px', fontWeight: 500, color: '#333', minWidth: '180px' }}>
+                  Standard Deviation (σ): <span style={{ 
+                    fontFamily: "'IBM Plex Mono', monospace", color: '#0066cc', fontWeight: 600
+                  }}>{sigma.toFixed(2)}</span>
+                </label>
+                <input
+                  type="range" min="0.1" max="1.2" step="0.05" value={sigma}
+                  onChange={(e) => setSigma(parseFloat(e.target.value))}
+                  style={{ flex: 1, height: '6px', borderRadius: '3px', cursor: 'pointer', accentColor: '#0066cc' }}
+                />
+              </div>
+            </div>
+
+            {/* Main Chart */}
+            <div style={{
+              backgroundColor: 'white', borderRadius: '12px', padding: '24px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8', marginBottom: '20px'
+            }}>
+              <svg width={width} height={height} style={{ display: 'block', margin: '0 auto', maxWidth: '100%' }}>
+                {/* Grid lines */}
+                {[-1, -0.5, 0, 0.5, 1].map(k => (
+                  <line key={`grid-v-${k}`} x1={scaleX(k)} y1={margin.top} x2={scaleX(k)} y2={margin.top + plotHeight}
+                    stroke="#eee" strokeWidth="1" />
+                ))}
+                {[1, 2, 3, 4].map(p => (
+                  <line key={`grid-h-${p}`} x1={margin.left} y1={scaleY(p)} x2={margin.left + plotWidth} y2={scaleY(p)}
+                    stroke="#eee" strokeWidth="1" />
+                ))}
+
+                {/* Axes */}
+                <line x1={margin.left} y1={margin.top + plotHeight} x2={margin.left + plotWidth} y2={margin.top + plotHeight}
+                  stroke="#333" strokeWidth="1.5" />
+                <line x1={scaleX(0)} y1={margin.top} x2={scaleX(0)} y2={margin.top + plotHeight}
+                  stroke="#333" strokeWidth="1" strokeDasharray="4,4" opacity="0.5" />
+
+                {/* Exponential curve */}
+                <path d={curvePath} fill="none" stroke="#0066cc" strokeWidth="3" />
+
+                {/* Chord (line between two outcomes) */}
+                <line x1={scaleX(kMinus)} y1={scaleY(pMinus)} x2={scaleX(kPlus)} y2={scaleY(pPlus)}
+                  stroke="#ff6b35" strokeWidth="2.5" />
+
+                {/* Horizontal line at geometric mean */}
+                <line x1={scaleX(kMinus)} y1={scaleY(geometricMean)} x2={scaleX(kPlus)} y2={scaleY(geometricMean)}
+                  stroke="#2d936c" strokeWidth="2" strokeDasharray="6,4" />
+
+                {/* Vertical volatility drag line */}
+                <line x1={scaleX(0)} y1={scaleY(arithmeticMean)} x2={scaleX(0)} y2={scaleY(geometricMean)}
+                  stroke="#d62839" strokeWidth="3" />
+
+                {/* σ annotation - horizontal bracket */}
+                <line x1={scaleX(0)} y1={scaleY(pMinus) + 15} x2={scaleX(kPlus)} y2={scaleY(pMinus) + 15}
+                  stroke="#666" strokeWidth="1.5" />
+                <line x1={scaleX(0)} y1={scaleY(pMinus) + 10} x2={scaleX(0)} y2={scaleY(pMinus) + 20}
+                  stroke="#666" strokeWidth="1.5" />
+                <line x1={scaleX(kPlus)} y1={scaleY(pMinus) + 10} x2={scaleX(kPlus)} y2={scaleY(pMinus) + 20}
+                  stroke="#666" strokeWidth="1.5" />
+                <text x={(scaleX(0) + scaleX(kPlus)) / 2} y={scaleY(pMinus) + 35}
+                  textAnchor="middle" fontSize="14" fontWeight="600" fill="#333">
+                  σ = {sigma.toFixed(2)}
+                </text>
+
+                {/* Outcome points */}
+                <circle cx={scaleX(kMinus)} cy={scaleY(pMinus)} r="8" fill="#ff6b35" />
+                <circle cx={scaleX(kPlus)} cy={scaleY(pPlus)} r="8" fill="#ff6b35" />
+                <circle cx={scaleX(0)} cy={scaleY(arithmeticMean)} r="6" fill="#ff6b35" />
+                <circle cx={scaleX(0)} cy={scaleY(geometricMean)} r="6" fill="#2d936c" />
+
+                {/* Labels for outcomes */}
+                <text x={scaleX(kMinus) - 10} y={scaleY(pMinus) + 25} textAnchor="middle" fontSize="12" fill="#666">
+                  K = {kMinus.toFixed(1)}
+                </text>
+                <text x={scaleX(kMinus) - 10} y={scaleY(pMinus) + 40} textAnchor="middle" fontSize="11" fill="#888">
+                  P = {pMinus.toFixed(3)}
+                </text>
+
+                <text x={scaleX(kPlus) + 10} y={scaleY(pPlus) - 15} textAnchor="middle" fontSize="12" fill="#666">
+                  K = +{kPlus.toFixed(1)}
+                </text>
+                <text x={scaleX(kPlus) + 10} y={scaleY(pPlus) - 0} textAnchor="middle" fontSize="11" fill="#888">
+                  P = {pPlus.toFixed(3)}
+                </text>
+
+                {/* Arithmetic mean label */}
+                <text x={scaleX(0) + 15} y={scaleY(arithmeticMean) - 8} textAnchor="start" fontSize="12" fontWeight="600" fill="#ff6b35">
+                  E[P] = {arithmeticMean.toFixed(3)}
+                </text>
+                <text x={scaleX(0) + 15} y={scaleY(arithmeticMean) + 8} textAnchor="start" fontSize="11" fill="#ff6b35">
+                  (Arithmetic Mean)
+                </text>
+
+                {/* Geometric mean label */}
+                <text x={scaleX(0) + 15} y={scaleY(geometricMean) + 18} textAnchor="start" fontSize="12" fontWeight="600" fill="#2d936c">
+                  e^E[K] = {geometricMean.toFixed(3)}
+                </text>
+                <text x={scaleX(0) + 15} y={scaleY(geometricMean) + 33} textAnchor="start" fontSize="11" fill="#2d936c">
+                  (Geometric Mean)
+                </text>
+
+                {/* Volatility drag label */}
+                <text x={scaleX(0) - 12} y={(scaleY(arithmeticMean) + scaleY(geometricMean)) / 2 - 5} textAnchor="end" fontSize="13" fontWeight="600" fill="#d62839">
+                  Volatility
+                </text>
+                <text x={scaleX(0) - 12} y={(scaleY(arithmeticMean) + scaleY(geometricMean)) / 2 + 10} textAnchor="end" fontSize="13" fontWeight="600" fill="#d62839">
+                  Drag
+                </text>
+
+                {/* Curve label */}
+                <text x={scaleX(1.1)} y={scaleY(Math.exp(1.1)) - 10} textAnchor="start" fontSize="13" fontWeight="600" fill="#0066cc">
+                  P = eᴷ
+                </text>
+
+                {/* X-axis label */}
+                <text x={margin.left + plotWidth / 2} y={height - 15} textAnchor="middle" fontSize="14" fill="#333">
+                  Log-Return K
+                </text>
+
+                {/* Y-axis label */}
+                <text x={20} y={margin.top + plotHeight / 2} textAnchor="middle" fontSize="14" fill="#333"
+                  transform={`rotate(-90, 20, ${margin.top + plotHeight / 2})`}>
+                  Price / Growth Factor
+                </text>
+
+                {/* X-axis ticks */}
+                {[-1, -0.5, 0, 0.5, 1].map(k => (
+                  <text key={`tick-${k}`} x={scaleX(k)} y={margin.top + plotHeight + 20} textAnchor="middle" fontSize="11" fill="#666">
+                    {k}
+                  </text>
+                ))}
+
+                {/* Y-axis ticks */}
+                {[1, 2, 3, 4].map(p => (
+                  <text key={`tick-y-${p}`} x={margin.left - 10} y={scaleY(p) + 4} textAnchor="end" fontSize="11" fill="#666">
+                    {p}
+                  </text>
+                ))}
+              </svg>
+            </div>
+
+            {/* Calculations Panel */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
+              {/* Key Values */}
+              <div style={{
+                backgroundColor: 'white', borderRadius: '12px', padding: '20px 24px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8'
+              }}>
+                <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#333', marginBottom: '16px' }}>
+                  Key Values
+                </h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#666' }}>σ (std dev of K):</span>
+                    <span style={{ fontWeight: 500, color: '#333' }}>{sigma.toFixed(3)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#666' }}>σ²:</span>
+                    <span style={{ fontWeight: 500, color: '#333' }}>{(sigma * sigma).toFixed(4)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #eee', paddingTop: '10px' }}>
+                    <span style={{ color: '#d62839', fontWeight: 500 }}>σ²/2:</span>
+                    <span style={{ fontWeight: 600, color: '#d62839' }}>{sigmaSquaredHalf.toFixed(4)}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Means Comparison */}
+              <div style={{
+                backgroundColor: 'white', borderRadius: '12px', padding: '20px 24px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8'
+              }}>
+                <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#333', marginBottom: '16px' }}>
+                  Means Comparison
+                </h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#ff6b35' }}>Arithmetic Mean:</span>
+                    <span style={{ fontWeight: 500, color: '#ff6b35' }}>{arithmeticMean.toFixed(4)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ color: '#2d936c' }}>Geometric Mean:</span>
+                    <span style={{ fontWeight: 500, color: '#2d936c' }}>{geometricMean.toFixed(4)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #eee', paddingTop: '10px' }}>
+                    <span style={{ color: '#d62839', fontWeight: 500 }}>Difference (Drag):</span>
+                    <span style={{ fontWeight: 600, color: '#d62839' }}>{volatilityDragPrice.toFixed(4)}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Formula Verification */}
+              <div style={{
+                backgroundColor: '#f8f9ff', borderRadius: '12px', padding: '20px 24px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #d0d7ff', gridColumn: 'span 2'
+              }}>
+                <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#333', marginBottom: '16px' }}>
+                  Formula Verification: Arithmetic Mean = Geometric Mean × e^(σ²/2)
+                </h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{ color: '#2d936c', fontWeight: 500 }}>{geometricMean.toFixed(4)}</span>
+                    <span style={{ color: '#666' }}>×</span>
+                    <span style={{ color: '#d62839', fontWeight: 500 }}>e^({sigmaSquaredHalf.toFixed(4)})</span>
+                    <span style={{ color: '#666' }}>=</span>
+                    <span style={{ color: '#2d936c', fontWeight: 500 }}>{geometricMean.toFixed(4)}</span>
+                    <span style={{ color: '#666' }}>×</span>
+                    <span style={{ color: '#d62839', fontWeight: 500 }}>{theoreticalFactor.toFixed(4)}</span>
+                    <span style={{ color: '#666' }}>=</span>
+                    <span style={{ fontWeight: 600, color: '#0066cc' }}>{(geometricMean * theoreticalFactor).toFixed(4)}</span>
+                  </div>
+                  <div style={{ 
+                    backgroundColor: 'white', padding: '12px 16px', borderRadius: '8px',
+                    border: '1px solid #e0e0e0', marginTop: '4px'
+                  }}>
+                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>Comparison:</div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                      <div>
+                        <span style={{ color: '#666' }}>Actual (discrete): </span>
+                        <span style={{ fontWeight: 600, color: '#ff6b35' }}>{arithmeticMean.toFixed(4)}</span>
+                      </div>
+                      <div>
+                        <span style={{ color: '#666' }}>Formula (continuous): </span>
+                        <span style={{ fontWeight: 600, color: '#0066cc' }}>{(geometricMean * theoreticalFactor).toFixed(4)}</span>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#888', marginTop: '8px' }}>
+                      The small difference occurs because the exact formula holds for continuous lognormal distributions,
+                      while this visualization uses a symmetric two-point discrete approximation.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Key Insight */}
+            <div style={{
+              backgroundColor: '#fff8f0', borderRadius: '12px', padding: '20px 24px',
+              marginTop: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #ffe0c0'
+            }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#333', marginBottom: '12px' }}>
+                Key Insight: From σ to σ²/2
+              </h3>
+              <p style={{ fontSize: '13px', color: '#555', lineHeight: 1.6, margin: 0 }}>
+                The horizontal distance represents <strong>σ</strong> (standard deviation of log-returns).
+                The vertical gap (volatility drag) relates to <strong>σ²/2</strong> through the exponential transformation.
+                Specifically: <code style={{ backgroundColor: '#fff', padding: '2px 6px', borderRadius: '4px', fontFamily: "'IBM Plex Mono', monospace" }}>
+                ln(E[1+C]) = E[K] + σ²T/2</code>. The curvature of eᴷ is what creates this "drag" — 
+                large downswings hurt more than equivalent upswings help, due to the asymmetry of the exponential function.
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<VolatilityDragVisualization />, document.getElementById('root'));
+  </script>
+</body>
+</html>
