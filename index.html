@@ -3,14 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Volatility Drag: Jensen's Inequality in Action</title>
+  <title>Jensen's Inequality & GBM Drift Correction</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'IBM Plex Sans', -apple-system, sans-serif; background: #fafafa; }
+    body { font-family: 'IBM Plex Sans', -apple-system, sans-serif; background: #f5f5f7; }
+    .tab-button { 
+      padding: 12px 24px; border: none; background: #e8e8e8; cursor: pointer; 
+      font-size: 14px; font-weight: 500; transition: all 0.2s;
+    }
+    .tab-button.active { background: #0066cc; color: white; }
+    .tab-button:hover:not(.active) { background: #d8d8d8; }
   </style>
 </head>
 <body>
@@ -18,86 +24,185 @@
   <script type="text/babel">
     const { useState, useMemo } = React;
 
-    const VolatilityDragVisualization = () => {
-      const [sigma, setSigma] = useState(0.8);
+    // ==================== XORSHIFT128+ RNG ====================
+    // High-quality 64-bit RNG — avoids the periodicity and correlation issues
+    // of Math.sin-based seeders. Returns a float in [0, 1).
+    function xorshift128plus(state) {
+      // state is [lo, hi] as 32-bit integers (simulated as JS numbers)
+      let s1 = state[0];
+      let s0 = state[1];
+      state[0] = s0;
+      s1 ^= (s1 << 23) >>> 0;
+      s1 ^= s1 >>> 17;
+      s1 ^= s0;
+      s1 ^= s0 >>> 26;
+      state[1] = s1;
+      // combine s0 + s1 as unsigned 32-bit, map to [0,1)
+      return (((state[0] + state[1]) >>> 0) / 4294967296);
+    }
+
+    // Box-Muller using the xorshift state (consumes 2 uniform draws)
+    function nextGaussian(state) {
+      const u1 = xorshift128plus(state);
+      const u2 = xorshift128plus(state);
+      // Guard against log(0)
+      const safe = u1 < 1e-10 ? 1e-10 : u1;
+      return Math.sqrt(-2 * Math.log(safe)) * Math.cos(2 * Math.PI * u2);
+    }
+
+    // Seed a state array from a single integer seed using splitmix32
+    function seedState(seed) {
+      let s = seed >>> 0;
+      const sm = () => { s = (s + 0x9e3779b9) >>> 0; let x = s; x ^= x >>> 16; x = Math.imul(x, 0x85ebca6b) >>> 0; x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35) >>> 0; return x ^ (x >>> 16); };
+      return [sm(), sm()];
+    }
+
+    // ==================== JENSEN'S INEQUALITY VISUALIZATION ====================
+    const JensenVisualization = () => {
+      const [sigma, setSigma] = useState(0.20);
+      const [meanK, setMeanK] = useState(0.05);
+      const [zoomToGap, setZoomToGap] = useState(false);
+      const numPoints = 2;
       
       const calculations = useMemo(() => {
-        const kMinus = -sigma;
-        const kPlus = sigma;
-        const pMinus = Math.exp(kMinus);
-        const pPlus = Math.exp(kPlus);
-        const arithmeticMean = (pMinus + pPlus) / 2;
-        const geometricMean = Math.exp(0);
+        const points = [];
+        points.push(meanK - sigma, meanK + sigma);
+        
+        const prices = points.map(k => Math.exp(k));
+        const arithmeticMean = prices.reduce((a, b) => a + b, 0) / prices.length;
+        const expectedK = points.reduce((a, b) => a + b, 0) / points.length;
+        const geometricMean = Math.exp(expectedK);
         const volatilityDragPrice = arithmeticMean - geometricMean;
-        const theoreticalFactor = Math.exp((sigma * sigma) / 2);
-        const sigmaSquaredHalf = (sigma * sigma) / 2;
+        
+        const impliedMu = Math.log(arithmeticMean);
+        
+        const actualVariance = points.reduce((sum, k) => sum + (k - expectedK) ** 2, 0) / points.length;
+        const actualSigma = Math.sqrt(actualVariance);
+        const actualSigmaSquaredHalf = actualVariance / 2;
+        
+        const actualGap = impliedMu - expectedK;
         
         return {
-          kMinus, kPlus, pMinus, pPlus,
-          arithmeticMean, geometricMean,
-          volatilityDragPrice, theoreticalFactor, sigmaSquaredHalf
+          points, prices, arithmeticMean, geometricMean, expectedK,
+          volatilityDragPrice, impliedMu, actualSigma, actualSigmaSquaredHalf, actualGap
         };
-      }, [sigma]);
+      }, [sigma, meanK, numPoints]);
 
       const width = 700;
       const height = 500;
-      const margin = { top: 40, right: 60, bottom: 60, left: 70 };
+      const margin = { top: 40, right: 60, bottom: 85, left: 70 };
       const plotWidth = width - margin.left - margin.right;
       const plotHeight = height - margin.top - margin.bottom;
 
-      const kMin = -1.5;
-      const kMax = 1.5;
-      const pMin = 0;
-      const pMax = 5;
+      const actualSigmaSquaredHalf = calculations.actualSigmaSquaredHalf;
+      const exactInflation = calculations.actualGap;
+
+      const zoomPad = Math.max(sigma * 0.5, exactInflation * 2, 0.05);
+      const kMin = zoomToGap 
+        ? meanK - exactInflation - zoomPad
+        : Math.min(-0.5, meanK - sigma - 0.3);
+      const kMax = zoomToGap
+        ? meanK + exactInflation + zoomPad
+        : Math.max(0.5, meanK + sigma + 0.3);
+      const pMin = zoomToGap
+        ? Math.exp(kMin) * 0.98
+        : 0;
+      const pMax = zoomToGap
+        ? Math.exp(kMax) * 1.02
+        : Math.max(2.5, Math.exp(meanK + sigma) * 1.2);
 
       const scaleX = (k) => margin.left + ((k - kMin) / (kMax - kMin)) * plotWidth;
       const scaleY = (p) => margin.top + plotHeight - ((p - pMin) / (pMax - pMin)) * plotHeight;
 
       const curvePoints = useMemo(() => {
-        const points = [];
-        for (let k = kMin; k <= kMax; k += 0.02) {
-          points.push({ k, p: Math.exp(k) });
+        const pts = [];
+        const s2h = sigma * sigma / 2;
+        const zPad = Math.max(sigma * 0.5, s2h * 2, 0.05);
+        const cMin = zoomToGap 
+          ? meanK - s2h - zPad - 0.05
+          : Math.min(-0.5, meanK - sigma - 0.3) - 0.1;
+        const cMax = zoomToGap
+          ? meanK + s2h + zPad + 0.05
+          : Math.max(0.5, meanK + sigma + 0.3) + 0.1;
+        const step = (cMax - cMin) / 500;
+        for (let k = cMin; k <= cMax; k += step) {
+          pts.push({ k, p: Math.exp(k) });
         }
-        return points;
-      }, []);
+        return pts;
+      }, [meanK, sigma, zoomToGap]);
 
       const curvePath = curvePoints
         .map((pt, i) => `${i === 0 ? 'M' : 'L'} ${scaleX(pt.k)} ${scaleY(pt.p)}`)
         .join(' ');
 
-      const { kMinus, kPlus, pMinus, pPlus, arithmeticMean, geometricMean, volatilityDragPrice, theoreticalFactor, sigmaSquaredHalf } = calculations;
+      const { points, prices, arithmeticMean, geometricMean, expectedK, volatilityDragPrice, impliedMu, actualSigma, actualGap } = calculations;
 
       return (
         <div style={{ padding: '24px', minHeight: '100vh' }}>
-          <div style={{ maxWidth: '900px', margin: '0 auto' }}>
-            <h1 style={{
-              fontSize: '24px', fontWeight: 600, color: '#1a1a2e',
-              marginBottom: '8px', letterSpacing: '-0.5px'
-            }}>
-              Volatility Drag: Jensen's Inequality in Action
+          <div style={{ maxWidth: '1000px', margin: '0 auto' }}>
+            <h1 style={{ fontSize: '24px', fontWeight: 600, color: '#1a1a2e', marginBottom: '8px' }}>
+              Jensen's Inequality: E[e<sup>r</sup>] ≠ e<sup>E[r]</sup>
             </h1>
             
             <p style={{ fontSize: '14px', color: '#666', marginBottom: '24px', lineHeight: 1.5 }}>
-              The vertical gap between the chord (arithmetic mean) and the curve (geometric mean) 
-              is the volatility drag — caused by the convexity of the exponential function.
+              The convexity of the exponential function causes a systematic gap between 
+              the average of the outputs and the output of the average — a consequence of Jensen's inequality.
+              This tab illustrates the effect in the simplest case: a single time interval with two equally likely return outcomes, r₁ = r − σ and r₂ = r + σ.
+              When we average the two resulting prices (arithmetic mean), the result lies on the chord, 
+              above the curve. This inflation is the reason the GBM formula must subtract σ²/2 from the drift.
             </p>
 
-            {/* Sigma Slider */}
+            {/* Controls */}
             <div style={{
               backgroundColor: 'white', borderRadius: '12px', padding: '20px 24px',
               marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8'
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-                <label style={{ fontSize: '14px', fontWeight: 500, color: '#333', minWidth: '180px' }}>
-                  Standard Deviation (σ): <span style={{ 
-                    fontFamily: "'IBM Plex Mono', monospace", color: '#0066cc', fontWeight: 600
-                  }}>{sigma.toFixed(2)}</span>
-                </label>
-                <input
-                  type="range" min="0.1" max="1.2" step="0.05" value={sigma}
-                  onChange={(e) => setSigma(parseFloat(e.target.value))}
-                  style={{ flex: 1, height: '6px', borderRadius: '3px', cursor: 'pointer', accentColor: '#0066cc' }}
-                />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+                  <label style={{ fontSize: '14px', fontWeight: 500, color: '#333', minWidth: '280px' }}>
+                    Rate of Return r: <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: '#2d936c', fontWeight: 600 }}>{(meanK * 100).toFixed(0)}%</span>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: '#999', fontWeight: 400, fontSize: '12px' }}> ({meanK.toFixed(2)})</span>
+                  </label>
+                  <input
+                    type="range" min="-0.5" max="0.8" step="0.01" value={meanK}
+                    onChange={(e) => setMeanK(parseFloat(e.target.value))}
+                    style={{ flex: 1, height: '6px', cursor: 'pointer', accentColor: '#2d936c' }}
+                  />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+                  <label style={{ fontSize: '14px', fontWeight: 500, color: '#333', minWidth: '280px' }}>
+                    Volatility σ: <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: '#0066cc', fontWeight: 600 }}>{(sigma * 100).toFixed(0)}%</span>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: '#999', fontWeight: 400, fontSize: '12px' }}> ({sigma.toFixed(2)})</span>
+                  </label>
+                  <input
+                    type="range" min="0.01" max="1.2" step="0.01" value={sigma}
+                    onChange={(e) => setSigma(parseFloat(e.target.value))}
+                    style={{ flex: 1, height: '6px', cursor: 'pointer', accentColor: '#0066cc' }}
+                  />
+                </div>
+                {/* Display derived K values */}
+                <div style={{ 
+                  display: 'flex', gap: '24px', fontSize: '13px', fontFamily: "'IBM Plex Mono', monospace",
+                  padding: '8px 0', borderTop: '1px solid #eee', color: '#666',
+                  alignItems: 'center', flexWrap: 'wrap'
+                }}>
+                  <span>r₁ = r − σ = <span style={{ color: '#ff6b35', fontWeight: 600 }}>{(meanK - sigma).toFixed(2)}</span> ({((meanK - sigma) * 100).toFixed(0)}%)</span>
+                  <span>r₂ = r + σ = <span style={{ color: '#ff6b35', fontWeight: 600 }}>{(meanK + sigma).toFixed(2)}</span> ({((meanK + sigma) * 100).toFixed(0)}%)</span>
+                  <button 
+                    onClick={() => setZoomToGap(!zoomToGap)}
+                    style={{
+                      marginLeft: 'auto', padding: '4px 14px', fontSize: '12px', fontWeight: 600,
+                      border: zoomToGap ? '2px solid #0066cc' : '1px solid #ccc',
+                      borderRadius: '6px', cursor: 'pointer',
+                      backgroundColor: zoomToGap ? '#e8f0fe' : '#f8f8f8',
+                      color: zoomToGap ? '#0066cc' : '#666',
+                      fontFamily: "'IBM Plex Sans', sans-serif",
+                      transition: 'all 0.15s'
+                    }}
+                  >
+                    {zoomToGap ? '🔍 Zoom ON' : '🔍 Zoom to gap'}
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -107,234 +212,341 @@
               boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8', marginBottom: '20px'
             }}>
               <svg width={width} height={height} style={{ display: 'block', margin: '0 auto', maxWidth: '100%' }}>
-                {/* Grid lines */}
-                {[-1, -0.5, 0, 0.5, 1].map(k => (
-                  <line key={`grid-v-${k}`} x1={scaleX(k)} y1={margin.top} x2={scaleX(k)} y2={margin.top + plotHeight}
-                    stroke="#eee" strokeWidth="1" />
-                ))}
-                {[1, 2, 3, 4].map(p => (
-                  <line key={`grid-h-${p}`} x1={margin.left} y1={scaleY(p)} x2={margin.left + plotWidth} y2={scaleY(p)}
-                    stroke="#eee" strokeWidth="1" />
-                ))}
+                <defs>
+                  <clipPath id="jensen-clip">
+                    <rect x={margin.left} y={margin.top} width={plotWidth} height={plotHeight} />
+                  </clipPath>
+                </defs>
+                <g clipPath="url(#jensen-clip)">
+                {Array.from({length: 5}, (_, i) => {
+                  const k = kMin + (i + 1) * (kMax - kMin) / 6;
+                  return (
+                    <line key={`grid-v-${i}`} x1={scaleX(k)} y1={margin.top} x2={scaleX(k)} y2={margin.top + plotHeight}
+                      stroke="#eee" strokeWidth="1" />
+                  );
+                })}
+                {(() => {
+                  const yStep = pMax < 6 ? 1 : pMax < 12 ? 2 : 5;
+                  const lines = [];
+                  for (let p = yStep; p < pMax; p += yStep) { lines.push(p); }
+                  return lines.map(p => (
+                    <line key={`grid-h-${p}`} x1={margin.left} y1={scaleY(p)} x2={margin.left + plotWidth} y2={scaleY(p)}
+                      stroke="#eee" strokeWidth="1" />
+                  ));
+                })()}
 
-                {/* Axes */}
-                <line x1={margin.left} y1={margin.top + plotHeight} x2={margin.left + plotWidth} y2={margin.top + plotHeight}
-                  stroke="#333" strokeWidth="1.5" />
+                {/* Vertical reference lines */}
                 <line x1={scaleX(0)} y1={margin.top} x2={scaleX(0)} y2={margin.top + plotHeight}
-                  stroke="#333" strokeWidth="1" strokeDasharray="4,4" opacity="0.5" />
+                  stroke="#333" strokeWidth="1.5" strokeDasharray="5,5" opacity="0.6" />
+                {Math.abs(meanK) > 0.01 && (
+                  <g>
+                    <line x1={scaleX(meanK)} y1={margin.top} x2={scaleX(meanK)} y2={margin.top + plotHeight}
+                      stroke="#2d936c" strokeWidth="1.5" strokeDasharray="5,5" opacity="0.4" />
+                    {(() => {
+                      const correctedR = meanK - (sigma * sigma / 2);
+                      const rLabelY = margin.top + plotHeight + 35;
+                      return (
+                        <text x={scaleX(meanK)} y={rLabelY} textAnchor="middle" fontSize="11" fontWeight="600" fill="#2d936c"
+                          stroke="white" strokeWidth="3" paintOrder="stroke">
+                          r={meanK.toFixed(2)}
+                        </text>
+                      );
+                    })()}
+                  </g>
+                )}
 
-                {/* Exponential curve */}
-                <path d={curvePath} fill="none" stroke="#0066cc" strokeWidth="3" />
+                {/* Exponential curve P = e^K */}
+                <path d={curvePath} fill="none" stroke="#0066cc" strokeWidth="4" />
+                {(() => {
+                  const labelK = Math.min(kMax - 0.3, meanK + sigma + 0.2);
+                  const labelP = Math.exp(labelK);
+                  const labelX = scaleX(labelK);
+                  const labelY = scaleY(Math.min(pMax * 0.85, labelP));
+                  return (
+                    <text x={labelX + 15} y={labelY - 5} fill="#0066cc" fontSize="16" fontWeight="700"
+                      stroke="white" strokeWidth="3" paintOrder="stroke">
+                      P = e<tspan baselineShift="super" fontSize="11">r</tspan>
+                    </text>
+                  );
+                })()}
 
-                {/* Chord (line between two outcomes) */}
-                <line x1={scaleX(kMinus)} y1={scaleY(pMinus)} x2={scaleX(kPlus)} y2={scaleY(pPlus)}
-                  stroke="#ff6b35" strokeWidth="2.5" />
+                {/* Chord connecting points */}
+                <line x1={scaleX(points[0])} y1={scaleY(prices[0])} 
+                      x2={scaleX(points[1])} y2={scaleY(prices[1])}
+                      stroke="#ff6b35" strokeWidth="3" />
+
+                {/* Vertical lines from x-axis to points */}
+                {points.map((k, i) => (
+                  <line key={`vline-${i}`}
+                    x1={scaleX(k)} y1={margin.top + plotHeight}
+                    x2={scaleX(k)} y2={scaleY(prices[i])}
+                    stroke="#ff6b35" strokeWidth="1" strokeDasharray="3,3" opacity="0.3" />
+                ))}
+
+                {/* Points on curve with r₁/r₂ labels */}
+                {points.map((k, i) => {
+                  const isLeft = i === 0;
+                  const labelOffsetY = isLeft ? 25 : -25;
+                  const labelOffsetY2 = isLeft ? 38 : -12;
+                  const rLabel = isLeft ? 'r₁' : 'r₂';
+                  
+                  return (
+                    <g key={`point-group-${i}`}>
+                      <circle cx={scaleX(k)} cy={scaleY(prices[i])} r="7" fill="#ff6b35" stroke="white" strokeWidth="2.5" />
+                      
+                      <text 
+                        x={scaleX(k)} 
+                        y={scaleY(prices[i]) + labelOffsetY} 
+                        textAnchor="middle" 
+                        fontSize="11" 
+                        fontWeight="600" 
+                        fill="#333"
+                        stroke="white" strokeWidth="3" paintOrder="stroke"
+                      >
+                        {rLabel}={k.toFixed(2)}
+                      </text>
+                      
+                      <text 
+                        x={scaleX(k)} 
+                        y={scaleY(prices[i]) + labelOffsetY2} 
+                        textAnchor="middle" 
+                        fontSize="11" 
+                        fontWeight="600" 
+                        fill="#ff6b35"
+                        stroke="white" strokeWidth="3" paintOrder="stroke"
+                      >
+                        P={prices[i].toFixed(2)}
+                      </text>
+                    </g>
+                  );
+                })}
 
                 {/* Horizontal line at geometric mean */}
-                <line x1={scaleX(kMinus)} y1={scaleY(geometricMean)} x2={scaleX(kPlus)} y2={scaleY(geometricMean)}
-                  stroke="#2d936c" strokeWidth="2" strokeDasharray="6,4" />
+                <line x1={scaleX(points[0])} y1={scaleY(geometricMean)} x2={scaleX(points[1])} y2={scaleY(geometricMean)}
+                  stroke="#2d936c" strokeWidth="2.5" strokeDasharray="6,4" />
+                
+                {/* Geometric mean point on curve */}
+                <circle cx={scaleX(expectedK)} cy={scaleY(geometricMean)} r="9" fill="#2d936c" stroke="white" strokeWidth="2.5" />
+
+                {/* Arithmetic mean point (on chord / above curve) */}
+                <circle cx={scaleX(expectedK)} cy={scaleY(arithmeticMean)} r="9" fill="#ff6b35" stroke="white" strokeWidth="2.5" />
 
                 {/* Vertical volatility drag line */}
-                <line x1={scaleX(0)} y1={scaleY(arithmeticMean)} x2={scaleX(0)} y2={scaleY(geometricMean)}
-                  stroke="#d62839" strokeWidth="3" />
+                <line x1={scaleX(expectedK)} y1={scaleY(arithmeticMean)} x2={scaleX(expectedK)} y2={scaleY(geometricMean)}
+                  stroke="#d62839" strokeWidth="4" />
 
-                {/* σ annotation - horizontal bracket */}
-                <line x1={scaleX(0)} y1={scaleY(pMinus) + 15} x2={scaleX(kPlus)} y2={scaleY(pMinus) + 15}
-                  stroke="#666" strokeWidth="1.5" />
-                <line x1={scaleX(0)} y1={scaleY(pMinus) + 10} x2={scaleX(0)} y2={scaleY(pMinus) + 20}
-                  stroke="#666" strokeWidth="1.5" />
-                <line x1={scaleX(kPlus)} y1={scaleY(pMinus) + 10} x2={scaleX(kPlus)} y2={scaleY(pMinus) + 20}
-                  stroke="#666" strokeWidth="1.5" />
-                <text x={(scaleX(0) + scaleX(kPlus)) / 2} y={scaleY(pMinus) + 35}
-                  textAnchor="middle" fontSize="14" fontWeight="600" fill="#333">
-                  σ = {sigma.toFixed(2)}
+                {/* Purple point at r+σ²/2 with vertical line to x-axis */}
+                {(() => {
+                  const approxInflR = expectedK + exactInflation;
+                  return (
+                    <g>
+                      <circle cx={scaleX(approxInflR)} cy={scaleY(arithmeticMean)} r="7" fill="#9933ff" stroke="white" strokeWidth="2.5" />
+                      <line x1={scaleX(expectedK)} y1={scaleY(arithmeticMean)} x2={scaleX(approxInflR)} y2={scaleY(arithmeticMean)}
+                        stroke="#9933ff" strokeWidth="2.5" strokeDasharray="5,4" />
+                      <line x1={scaleX(approxInflR)} y1={scaleY(arithmeticMean)} x2={scaleX(approxInflR)} y2={margin.top + plotHeight}
+                        stroke="#9933ff" strokeWidth="1.5" strokeDasharray="4,3" opacity="0.5" />
+                    </g>
+                  );
+                })()}
+
+                {/* CORRECTION VISUALIZATION: r - σ²/2 */}
+                {(() => {
+                  const correctedR = expectedK - exactInflation;
+                  const correctedPrice = Math.exp(correctedR);
+                  return (
+                    <g>
+                      <line x1={scaleX(correctedR)} y1={scaleY(correctedPrice)} x2={scaleX(correctedR)} y2={margin.top + plotHeight}
+                        stroke="#21c354" strokeWidth="1.5" strokeDasharray="4,3" opacity="0.5" />
+                      <circle cx={scaleX(correctedR)} cy={scaleY(correctedPrice)} r="7" fill="#21c354" stroke="white" strokeWidth="2.5" />
+                      <line x1={scaleX(correctedR)} y1={scaleY(correctedPrice)} x2={scaleX(correctedR)} y2={scaleY(geometricMean)}
+                        stroke="#21c354" strokeWidth="3" />
+                      <polygon 
+                        points={`${scaleX(correctedR)},${scaleY(geometricMean)} ${scaleX(correctedR)-5},${scaleY(geometricMean)+10} ${scaleX(correctedR)+5},${scaleY(geometricMean)+10}`}
+                        fill="#21c354" />
+                      <line x1={scaleX(correctedR)} y1={scaleY(geometricMean)} x2={scaleX(expectedK)} y2={scaleY(geometricMean)}
+                        stroke="#21c354" strokeWidth="1.5" strokeDasharray="4,3" opacity="0.6" />
+                      <line x1={scaleX(correctedR)} y1={margin.top + plotHeight} x2={scaleX(correctedR)} y2={margin.top + plotHeight + 6}
+                        stroke="#21c354" strokeWidth="2" />
+                      <text x={scaleX(correctedR)} y={margin.top + plotHeight + 50} textAnchor="middle" fontSize="10" fontWeight="600" fill="#21c354"
+                        stroke="white" strokeWidth="3" paintOrder="stroke">
+                        r−σ²/2 = {correctedR.toFixed(3)}
+                      </text>
+                      <text x={scaleX(correctedR) - 12} y={scaleY((correctedPrice + geometricMean) / 2)} 
+                        textAnchor="end" fontSize="10" fontWeight="600" fill="#21c354"
+                        stroke="white" strokeWidth="3" paintOrder="stroke">
+                        +σ²/2 inflation
+                      </text>
+                      <text x={scaleX(correctedR) - 12} y={scaleY((correctedPrice + geometricMean) / 2) + 13} 
+                        textAnchor="end" fontSize="10" fontWeight="600" fill="#21c354"
+                        stroke="white" strokeWidth="3" paintOrder="stroke">
+                        → back to e<tspan baselineShift="super" fontSize="7">r</tspan>
+                      </text>
+                    </g>
+                  );
+                })()}
+
+                {/* Arithmetic Mean = Inflated Value */}
+                <text x={scaleX(expectedK) - 15} y={scaleY(arithmeticMean) - 10} 
+                      fill="#ff6b35" fontSize="13" fontWeight="700" textAnchor="end"
+                      stroke="white" strokeWidth="3" paintOrder="stroke">
+                  E[P] ≈ {Math.exp(expectedK + exactInflation).toFixed(3)}
+                </text>
+                <text x={scaleX(expectedK) - 15} y={scaleY(arithmeticMean) + 4} 
+                      fill="#ff6b35" fontSize="11" textAnchor="end"
+                      stroke="white" strokeWidth="3" paintOrder="stroke">
+                  (Inflated Value)
                 </text>
 
-                {/* Outcome points */}
-                <circle cx={scaleX(kMinus)} cy={scaleY(pMinus)} r="8" fill="#ff6b35" />
-                <circle cx={scaleX(kPlus)} cy={scaleY(pPlus)} r="8" fill="#ff6b35" />
-                <circle cx={scaleX(0)} cy={scaleY(arithmeticMean)} r="6" fill="#ff6b35" />
-                <circle cx={scaleX(0)} cy={scaleY(geometricMean)} r="6" fill="#2d936c" />
-
-                {/* Labels for outcomes */}
-                <text x={scaleX(kMinus) - 10} y={scaleY(pMinus) + 25} textAnchor="middle" fontSize="12" fill="#666">
-                  K = {kMinus.toFixed(1)}
+                {/* Target: e^r */}
+                <text x={scaleX(expectedK) + 15} y={scaleY(geometricMean) + 25} 
+                      fill="#2d936c" fontSize="13" fontWeight="700"
+                      stroke="white" strokeWidth="3" paintOrder="stroke">
+                  e<tspan baselineShift="super" fontSize="9">r</tspan> = {geometricMean.toFixed(3)}
                 </text>
-                <text x={scaleX(kMinus) - 10} y={scaleY(pMinus) + 40} textAnchor="middle" fontSize="11" fill="#888">
-                  P = {pMinus.toFixed(3)}
+                <text x={scaleX(expectedK) + 15} y={scaleY(geometricMean) + 40} 
+                      fill="#2d936c" fontSize="11"
+                      stroke="white" strokeWidth="3" paintOrder="stroke">
+                  (Target)
                 </text>
 
-                <text x={scaleX(kPlus) + 10} y={scaleY(pPlus) - 15} textAnchor="middle" fontSize="12" fill="#666">
-                  K = +{kPlus.toFixed(1)}
+                {/* r + σ²/2 label */}
+                <text x={scaleX(expectedK + exactInflation)} y={scaleY(arithmeticMean) - 18} fill="#9933ff" fontSize="12" fontWeight="700" textAnchor="middle"
+                      stroke="white" strokeWidth="3" paintOrder="stroke">
+                  r+σ²/2 ≈ {(expectedK + exactInflation).toFixed(3)}
                 </text>
-                <text x={scaleX(kPlus) + 10} y={scaleY(pPlus) - 0} textAnchor="middle" fontSize="11" fill="#888">
-                  P = {pPlus.toFixed(3)}
-                </text>
+                </g>
 
-                {/* Arithmetic mean label */}
-                <text x={scaleX(0) + 15} y={scaleY(arithmeticMean) - 8} textAnchor="start" fontSize="12" fontWeight="600" fill="#ff6b35">
-                  E[P] = {arithmeticMean.toFixed(3)}
-                </text>
-                <text x={scaleX(0) + 15} y={scaleY(arithmeticMean) + 8} textAnchor="start" fontSize="11" fill="#ff6b35">
-                  (Arithmetic Mean)
-                </text>
+                {/* Axes (outside clip) */}
+                <line x1={margin.left} y1={margin.top + plotHeight} x2={margin.left + plotWidth} y2={margin.top + plotHeight}
+                  stroke="#333" strokeWidth="2" />
 
-                {/* Geometric mean label */}
-                <text x={scaleX(0) + 15} y={scaleY(geometricMean) + 18} textAnchor="start" fontSize="12" fontWeight="600" fill="#2d936c">
-                  e^E[K] = {geometricMean.toFixed(3)}
-                </text>
-                <text x={scaleX(0) + 15} y={scaleY(geometricMean) + 33} textAnchor="start" fontSize="11" fill="#2d936c">
-                  (Geometric Mean)
-                </text>
-
-                {/* Volatility drag label */}
-                <text x={scaleX(0) - 12} y={(scaleY(arithmeticMean) + scaleY(geometricMean)) / 2 - 5} textAnchor="end" fontSize="13" fontWeight="600" fill="#d62839">
-                  Volatility
-                </text>
-                <text x={scaleX(0) - 12} y={(scaleY(arithmeticMean) + scaleY(geometricMean)) / 2 + 10} textAnchor="end" fontSize="13" fontWeight="600" fill="#d62839">
-                  Drag
-                </text>
-
-                {/* Curve label */}
-                <text x={scaleX(1.1)} y={scaleY(Math.exp(1.1)) - 10} textAnchor="start" fontSize="13" fontWeight="600" fill="#0066cc">
-                  P = eᴷ
-                </text>
+                {/* r+σ²/2 on x-axis */}
+                {(() => {
+                  const approxInflR = expectedK + exactInflation;
+                  return (
+                    <g>
+                      <line x1={scaleX(approxInflR)} y1={margin.top + plotHeight} x2={scaleX(approxInflR)} y2={margin.top + plotHeight + 6}
+                        stroke="#9933ff" strokeWidth="2" />
+                      <text x={scaleX(approxInflR)} y={margin.top + plotHeight + 50} textAnchor="middle" fontSize="10" fontWeight="600" fill="#9933ff"
+                        stroke="white" strokeWidth="3" paintOrder="stroke">
+                        r+σ²/2 = {approxInflR.toFixed(3)}
+                      </text>
+                    </g>
+                  );
+                })()}
 
                 {/* X-axis label */}
-                <text x={margin.left + plotWidth / 2} y={height - 15} textAnchor="middle" fontSize="14" fill="#333">
-                  Log-Return K
+                <text x={margin.left + plotWidth / 2} y={height - 5} textAnchor="middle" fontSize="15" fontWeight="600" fill="#333">
+                  Return r
                 </text>
 
                 {/* Y-axis label */}
-                <text x={20} y={margin.top + plotHeight / 2} textAnchor="middle" fontSize="14" fill="#333"
+                <text x={20} y={margin.top + plotHeight / 2} textAnchor="middle" fontSize="15" fontWeight="600" fill="#333"
                   transform={`rotate(-90, 20, ${margin.top + plotHeight / 2})`}>
                   Price / Growth Factor
                 </text>
 
-                {/* X-axis ticks */}
-                {[-1, -0.5, 0, 0.5, 1].map(k => (
-                  <text key={`tick-${k}`} x={scaleX(k)} y={margin.top + plotHeight + 20} textAnchor="middle" fontSize="11" fill="#666">
-                    {k}
-                  </text>
-                ))}
-
-                {/* Y-axis ticks */}
-                {[1, 2, 3, 4].map(p => (
-                  <text key={`tick-y-${p}`} x={margin.left - 10} y={scaleY(p) + 4} textAnchor="end" fontSize="11" fill="#666">
-                    {p}
-                  </text>
-                ))}
+                {/* Axis ticks */}
+                {(() => {
+                  const range = kMax - kMin;
+                  const step = range < 0.3 ? 0.05 : range < 0.8 ? 0.1 : range < 2 ? 0.5 : range < 4 ? 1 : 2;
+                  const decimals = step < 0.1 ? 2 : 1;
+                  const ticks = [];
+                  let t = Math.ceil(kMin / step) * step;
+                  while (t <= kMax) { ticks.push(t); t += step; }
+                  return ticks.map(k => (
+                    <text key={`tick-${k}`} x={scaleX(k)} y={margin.top + plotHeight + 20} textAnchor="middle" fontSize="12" fontWeight="500" fill="#666">
+                      {k.toFixed(decimals)}
+                    </text>
+                  ));
+                })()}
+                {(() => {
+                  const yRange = pMax - pMin;
+                  const yStep = yRange < 0.5 ? 0.05 : yRange < 1 ? 0.1 : yRange < 3 ? 0.5 : yRange < 6 ? 1 : yRange < 12 ? 2 : 5;
+                  const yDecimals = yStep < 0.1 ? 2 : yStep < 1 ? 1 : 0;
+                  const yTicks = [];
+                  let start = Math.ceil(pMin / yStep) * yStep;
+                  for (let p = start; p <= pMax; p += yStep) { 
+                    if (p > pMin) yTicks.push(p); 
+                  }
+                  return yTicks.map(p => (
+                    <text key={`tick-y-${p}`} x={margin.left - 10} y={scaleY(p) + 4} textAnchor="end" fontSize="12" fontWeight="500" fill="#666">
+                      {p.toFixed(yDecimals)}
+                    </text>
+                  ));
+                })()}
               </svg>
             </div>
 
-            {/* Calculations Panel */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-              {/* Key Values */}
+            {/* Key Formulas Panel */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '16px', marginBottom: '20px' }}>
+              
+              {/* The Problem: Inflated Value */}
               <div style={{
-                backgroundColor: 'white', borderRadius: '12px', padding: '20px 24px',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8'
+                backgroundColor: '#f0f4ff', borderRadius: '12px', padding: '20px 24px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #c0d0ff'
               }}>
                 <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#333', marginBottom: '16px' }}>
-                  Key Values
+                  The Problem: Inflated Value
                 </h3>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#666' }}>σ (std dev of K):</span>
-                    <span style={{ fontWeight: 500, color: '#333' }}>{sigma.toFixed(3)}</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#666' }}>σ²:</span>
-                    <span style={{ fontWeight: 500, color: '#333' }}>{(sigma * sigma).toFixed(4)}</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #eee', paddingTop: '10px' }}>
-                    <span style={{ color: '#d62839', fontWeight: 500 }}>σ²/2:</span>
-                    <span style={{ fontWeight: 600, color: '#d62839' }}>{sigmaSquaredHalf.toFixed(4)}</span>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px', lineHeight: 2 }}>
+                  <div><span style={{ color: '#666' }}>Rate r =</span> <span style={{ color: '#2d936c', fontWeight: 600 }}>{expectedK.toFixed(4)} ({(expectedK * 100).toFixed(1)}%)</span></div>
+                  <div><span style={{ color: '#666' }}>r₁ = r − σ =</span> <span style={{ color: '#ff6b35', fontWeight: 600 }}>{points[0].toFixed(4)}</span></div>
+                  <div><span style={{ color: '#666' }}>r₂ = r + σ =</span> <span style={{ color: '#ff6b35', fontWeight: 600 }}>{points[1].toFixed(4)}</span></div>
+                  <div style={{ borderTop: '1px solid #c0d0ff', marginTop: '8px', paddingTop: '8px' }}>
+                    <div><span style={{ color: '#666' }}>Target price: e<sup>r</sup> =</span> <span style={{ color: '#2d936c', fontWeight: 600 }}>{geometricMean.toFixed(4)}</span></div>
+                    <div><span style={{ color: '#666' }}>Inflated value: E[P] = e<sup>r+σ²/2</sup> = e<sup>{(expectedK + exactInflation).toFixed(4)}</sup> =</span> <span style={{ color: '#ff6b35', fontWeight: 600 }}>{Math.exp(expectedK + exactInflation).toFixed(4)}</span></div>
                   </div>
                 </div>
               </div>
 
-              {/* Means Comparison */}
+              {/* The Solution: Subtract σ²/2 */}
               <div style={{
-                backgroundColor: 'white', borderRadius: '12px', padding: '20px 24px',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8'
+                backgroundColor: '#fff5f5', borderRadius: '12px', padding: '20px 24px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #ffc0c0'
               }}>
                 <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#333', marginBottom: '16px' }}>
-                  Means Comparison
+                  The Solution: Subtract σ²/2
                 </h3>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#ff6b35' }}>Arithmetic Mean:</span>
-                    <span style={{ fontWeight: 500, color: '#ff6b35' }}>{arithmeticMean.toFixed(4)}</span>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px', lineHeight: 2 }}>
+                  <div><span style={{ color: '#666' }}>σ (volatility):</span> <span style={{ color: '#d62839', fontWeight: 600 }}>{actualSigma.toFixed(4)} ({(actualSigma * 100).toFixed(1)}%)</span></div>
+                  <div><span style={{ color: '#666' }}>σ²/2 (inflation):</span> <span style={{ color: '#d62839', fontWeight: 600 }}>{exactInflation.toFixed(4)}</span></div>
+                  <div style={{ borderTop: '1px solid #ffc0c0', marginTop: '8px', paddingTop: '8px' }}>
+                    <div><span style={{ color: '#666' }}>Inflated value corresponds to: r + σ²/2 =</span> <span style={{ color: '#9933ff', fontWeight: 600 }}>{(expectedK + exactInflation).toFixed(4)}</span></div>
+                    <div><span style={{ color: '#666' }}>Target is at: r =</span> <span style={{ color: '#2d936c', fontWeight: 600 }}>{expectedK.toFixed(4)}</span></div>
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#2d936c' }}>Geometric Mean:</span>
-                    <span style={{ fontWeight: 500, color: '#2d936c' }}>{geometricMean.toFixed(4)}</span>
+                  <div style={{ fontSize: '11px', color: '#888', marginTop: '8px' }}>
+                    Use (r − σ²/2) = {(expectedK - exactInflation).toFixed(4)} in path formula to hit target e<sup>r</sup>.
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #eee', paddingTop: '10px' }}>
-                    <span style={{ color: '#d62839', fontWeight: 500 }}>Difference (Drag):</span>
-                    <span style={{ fontWeight: 600, color: '#d62839' }}>{volatilityDragPrice.toFixed(4)}</span>
+                  <div style={{ fontSize: '12px', color: '#555', marginTop: '10px', lineHeight: 1.5, borderTop: '1px solid #ffc0c0', paddingTop: '10px' }}>
+                    Starting from the corrected drift r − σ²/2, Jensen's inflation pushes the expected price upward 
+                    by σ²/2 in log-space, landing back at the target e<sup>r</sup>.
                   </div>
-                </div>
-              </div>
-
-              {/* Formula Verification */}
-              <div style={{
-                backgroundColor: '#f8f9ff', borderRadius: '12px', padding: '20px 24px',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #d0d7ff', gridColumn: 'span 2'
-              }}>
-                <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#333', marginBottom: '16px' }}>
-                  Formula Verification: Arithmetic Mean = Geometric Mean × e^(σ²/2)
-                </h3>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                    <span style={{ color: '#2d936c', fontWeight: 500 }}>{geometricMean.toFixed(4)}</span>
-                    <span style={{ color: '#666' }}>×</span>
-                    <span style={{ color: '#d62839', fontWeight: 500 }}>e^({sigmaSquaredHalf.toFixed(4)})</span>
-                    <span style={{ color: '#666' }}>=</span>
-                    <span style={{ color: '#2d936c', fontWeight: 500 }}>{geometricMean.toFixed(4)}</span>
-                    <span style={{ color: '#666' }}>×</span>
-                    <span style={{ color: '#d62839', fontWeight: 500 }}>{theoreticalFactor.toFixed(4)}</span>
-                    <span style={{ color: '#666' }}>=</span>
-                    <span style={{ fontWeight: 600, color: '#0066cc' }}>{(geometricMean * theoreticalFactor).toFixed(4)}</span>
-                  </div>
-                  <div style={{ 
-                    backgroundColor: 'white', padding: '12px 16px', borderRadius: '8px',
-                    border: '1px solid #e0e0e0', marginTop: '4px'
-                  }}>
-                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>Comparison:</div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
-                      <div>
-                        <span style={{ color: '#666' }}>Actual (discrete): </span>
-                        <span style={{ fontWeight: 600, color: '#ff6b35' }}>{arithmeticMean.toFixed(4)}</span>
-                      </div>
-                      <div>
-                        <span style={{ color: '#666' }}>Formula (continuous): </span>
-                        <span style={{ fontWeight: 600, color: '#0066cc' }}>{(geometricMean * theoreticalFactor).toFixed(4)}</span>
-                      </div>
-                    </div>
-                    <div style={{ fontSize: '11px', color: '#888', marginTop: '8px' }}>
-                      The small difference occurs because the exact formula holds for continuous lognormal distributions,
-                      while this visualization uses a symmetric two-point discrete approximation.
-                    </div>
+                  <div style={{ fontSize: '11px', color: '#999', marginTop: '8px', lineHeight: 1.4 }}>
+                    * With only 2 discrete points, σ²/2 is computed as ln(cosh(σ)) — the hyperbolic cosine 
+                    cosh(σ) = (e<sup>σ</sup> + e<sup>−σ</sup>)/2.
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Key Insight */}
+            {/* Key Insight Box */}
             <div style={{
-              backgroundColor: '#fff8f0', borderRadius: '12px', padding: '20px 24px',
-              marginTop: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #ffe0c0'
+              backgroundColor: '#fffbeb', borderRadius: '12px', padding: '20px 24px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #fde68a'
             }}>
-              <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#333', marginBottom: '12px' }}>
-                Key Insight: From σ to σ²/2
+              <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#92400e', marginBottom: '12px' }}>
+                Key Insight: Jensen's Inequality Inflates by ≈ σ²/2
               </h3>
-              <p style={{ fontSize: '13px', color: '#555', lineHeight: 1.6, margin: 0 }}>
-                The horizontal distance represents <strong>σ</strong> (standard deviation of log-returns).
-                The vertical gap (volatility drag) relates to <strong>σ²/2</strong> through the exponential transformation.
-                Specifically: <code style={{ backgroundColor: '#fff', padding: '2px 6px', borderRadius: '4px', fontFamily: "'IBM Plex Mono', monospace" }}>
-                ln(E[1+C]) = E[K] + σ²T/2</code>. The curvature of eᴷ is what creates this "drag" — 
-                large downswings hurt more than equivalent upswings help, due to the asymmetry of the exponential function.
+              <p style={{ fontSize: '13px', color: '#78350f', lineHeight: 1.6, margin: 0 }}>
+                If your target is E[S<sub>T</sub>] = S₀e<sup>rT</sup> and you put r directly in the exponent with randomness σW<sub>t</sub>, 
+                Jensen's inequality inflates the result to approximately S₀e<sup>(r+σ²/2)T</sup>. 
+                The horizontal gap on the chart shows this inflation: from r = {expectedK.toFixed(3)} to r + σ²/2 ≈ {(expectedK + exactInflation).toFixed(3)}.
+                The correction: use (r − σ²/2) in the path formula so that after inflation you land back at r.
+                Try changing r to see that the σ²/2 gap persists regardless of drift level.
+              </p>
+              <p style={{ fontSize: '13px', color: '#92400e', lineHeight: 1.5, marginTop: '10px', marginBottom: 0, fontStyle: 'italic' }}>
+                Try increasing σ — the gap grows, since inflation scales with σ²/2.
               </p>
             </div>
           </div>
@@ -342,7 +554,323 @@
       );
     };
 
-    ReactDOM.render(<VolatilityDragVisualization />, document.getElementById('root'));
+    // ==================== GBM SIMULATION ====================
+    const GBMSimulation = () => {
+      const [S0, setS0] = useState(100);
+      const [mu, setMu] = useState(0.06);
+      const [sigma, setSigma] = useState(0.40);
+      const [T, setT] = useState(1.0);
+      const [numSims, setNumSims] = useState(5000);
+
+      const simulation = useMemo(() => {
+        const dt = 0.01;
+        const steps = Math.floor(T / dt);
+        const timeAxis = Array.from({ length: steps }, (_, i) => i * dt);
+
+        // Accumulators for mean — store sums to avoid holding all paths in memory
+        const naiveSum = new Array(steps).fill(0);
+        const correctSum = new Array(steps).fill(0);
+
+        for (let sim = 0; sim < numSims; sim++) {
+          // Each simulation gets its own independent xorshift128+ state
+          // seeded deterministically but differently per sim
+          const state = seedState(sim * 1000003 + 7);
+          let W = 0;
+          naiveSum[0] += S0;
+          correctSum[0] += S0;
+
+          for (let step = 1; step < steps; step++) {
+            const z = nextGaussian(state);
+            const dW = z * Math.sqrt(dt);
+            W += dW;
+            const t = step * dt;
+            naiveSum[step]   += S0 * Math.exp(mu * t + sigma * W);
+            correctSum[step] += S0 * Math.exp((mu - 0.5 * sigma * sigma) * t + sigma * W);
+          }
+        }
+
+        const naiveMean   = naiveSum.map(s => s / numSims);
+        const correctMean = correctSum.map(s => s / numSims);
+        const targetCurve = timeAxis.map(t => S0 * Math.exp(mu * t));
+
+        return { timeAxis, naiveMean, correctMean, targetCurve };
+      }, [S0, mu, sigma, T, numSims]);
+
+      const { timeAxis, naiveMean, correctMean, targetCurve } = simulation;
+
+      const width = 800;
+      const height = 400;
+      const margin = { top: 40, right: 60, bottom: 50, left: 70 };
+      const plotWidth = width - margin.left - margin.right;
+      const plotHeight = height - margin.top - margin.bottom;
+
+      const xMax = T;
+      const yMin = S0 * 0.95;
+      const yMax = Math.max(...naiveMean, ...targetCurve) * 1.05;
+
+      const scaleX = (t) => margin.left + (t / xMax) * plotWidth;
+      const scaleY = (p) => margin.top + plotHeight - ((p - yMin) / (yMax - yMin)) * plotHeight;
+
+      const createPath = (data) => {
+        return data.map((val, i) => {
+          const x = scaleX(timeAxis[i]);
+          const y = scaleY(val);
+          return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
+        }).join(' ');
+      };
+
+      const finalTarget  = targetCurve[targetCurve.length - 1];
+      const finalNaive   = naiveMean[naiveMean.length - 1];
+      const finalCorrect = correctMean[correctMean.length - 1];
+
+      return (
+        <div style={{ padding: '24px', minHeight: '100vh' }}>
+          <div style={{ maxWidth: '1000px', margin: '0 auto' }}>
+            <h1 style={{ fontSize: '24px', fontWeight: 600, color: '#1a1a2e', marginBottom: '8px' }}>
+              GBM Drift Correction
+            </h1>
+            
+            <p style={{ fontSize: '14px', color: '#666', marginBottom: '24px', lineHeight: 1.5 }}>
+              The Jensen's Inequality tab showed the inflation mechanism with just 2 discrete points. This tab extends it to a full 
+              Monte Carlo simulation. As the number of simulated paths increases, the average converges to the theoretical expected 
+              value S₀e<sup>rT</sup>, confirming the correction. The inflated model (without correction) systematically overshoots 
+              the target. Notice that increasing the time horizon T has the same effect as increasing volatility σ — both amplify 
+              the inflation by σ²T/2, causing the uncorrected model to diverge further from the target.
+            </p>
+
+            {/* Controls */}
+            <div style={{
+              backgroundColor: 'white', borderRadius: '12px', padding: '20px 24px',
+              marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8'
+            }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: 500, color: '#666', display: 'block', marginBottom: '6px' }}>
+                    Initial Price (S₀): <span style={{ color: '#333', fontWeight: 600 }}>{S0}</span>
+                  </label>
+                  <input type="range" min="50" max="200" step="10" value={S0}
+                    onChange={(e) => setS0(parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: '#0066cc' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: 500, color: '#666', display: 'block', marginBottom: '6px' }}>
+                    Expected Return (r): <span style={{ color: '#0066cc', fontWeight: 600 }}>{(mu * 100).toFixed(0)}%</span>
+                    <span style={{ color: '#999', fontSize: '10px' }}> ({mu.toFixed(2)})</span>
+                  </label>
+                  <input type="range" min="0" max="0.5" step="0.02" value={mu}
+                    onChange={(e) => setMu(parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: '#0066cc' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: 500, color: '#666', display: 'block', marginBottom: '6px' }}>
+                    Volatility (σ): <span style={{ color: '#d62839', fontWeight: 600 }}>{(sigma * 100).toFixed(0)}%</span>
+                    <span style={{ color: '#999', fontSize: '10px' }}> ({sigma.toFixed(2)})</span>
+                  </label>
+                  <input type="range" min="0.1" max="1.0" step="0.05" value={sigma}
+                    onChange={(e) => setSigma(parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: '#d62839' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: 500, color: '#666', display: 'block', marginBottom: '6px' }}>
+                    Time Horizon (T): <span style={{ color: '#333', fontWeight: 600 }}>{T.toFixed(1)} years</span>
+                  </label>
+                  <input type="range" min="0.5" max="5" step="0.5" value={T}
+                    onChange={(e) => setT(parseFloat(e.target.value))}
+                    style={{ width: '100%', accentColor: '#333' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '12px', fontWeight: 500, color: '#666', display: 'block', marginBottom: '6px' }}>
+                    Simulations: <span style={{ color: '#333', fontWeight: 600 }}>{numSims}</span>
+                  </label>
+                  <input type="range" min="100" max="5000" step="100" value={numSims}
+                    onChange={(e) => setNumSims(parseInt(e.target.value))}
+                    style={{ width: '100%', accentColor: '#333' }} />
+                </div>
+              </div>
+            </div>
+
+            {/* Formulas Panel */}
+            <div style={{
+              backgroundColor: '#f8f9ff', borderRadius: '12px', padding: '16px 24px',
+              marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e0e4ff'
+            }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '24px', justifyContent: 'space-around', fontFamily: "'IBM Plex Mono', monospace", fontSize: '13px' }}>
+                <div>
+                  <span style={{ color: '#333', fontWeight: 600 }}>Target:</span>
+                  <span style={{ marginLeft: '8px' }}>E[S<sub>T</sub>] = S₀e<sup>rT</sup></span>
+                </div>
+                <div>
+                  <span style={{ color: '#ff4b4b', fontWeight: 600 }}>Inflated:</span>
+                  <span style={{ marginLeft: '8px' }}>S<sub>t</sub> = S₀e<sup>rt+σW<sub>t</sub></sup></span>
+                </div>
+                <div>
+                  <span style={{ color: '#21c354', fontWeight: 600 }}>Correct:</span>
+                  <span style={{ marginLeft: '8px' }}>S<sub>t</sub> = S₀e<sup>(r-½σ²)t+σW<sub>t</sub></sup></span>
+                </div>
+              </div>
+            </div>
+
+            {/* Monte Carlo Average Chart */}
+            <div style={{
+              backgroundColor: 'white', borderRadius: '12px', padding: '24px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8', marginBottom: '20px'
+            }}>
+              <svg width={width} height={height} style={{ display: 'block', margin: '0 auto', maxWidth: '100%' }}>
+                {/* Grid */}
+                {[0.2, 0.4, 0.6, 0.8, 1.0].filter(t => t <= T).map(t => (
+                  <line key={`grid-v-${t}`} x1={scaleX(t)} y1={margin.top} x2={scaleX(t)} y2={margin.top + plotHeight}
+                    stroke="#eee" strokeWidth="1" />
+                ))}
+
+                {/* Target line (black dashed) */}
+                <path d={createPath(targetCurve)} fill="none" stroke="#333" strokeWidth="3" strokeDasharray="8,4" />
+                
+                {/* Inflated model (red) */}
+                <path d={createPath(naiveMean)} fill="none" stroke="#ff4b4b" strokeWidth="2.5" />
+                
+                {/* Correct model (green) */}
+                <path d={createPath(correctMean)} fill="none" stroke="#21c354" strokeWidth="2.5" />
+
+                {/* Legend */}
+                <g transform={`translate(${margin.left + 10}, ${margin.top + 10})`}>
+                  <line x1="0" y1="0" x2="30" y2="0" stroke="#333" strokeWidth="3" strokeDasharray="8,4" />
+                  <text x="40" y="4" fontSize="11" fill="#333">Target E[S<tspan baselineShift="sub" fontSize="8">T</tspan>] = S₀e<tspan baselineShift="super" fontSize="8">rT</tspan></text>
+                  
+                  <line x1="0" y1="20" x2="30" y2="20" stroke="#ff4b4b" strokeWidth="2.5" />
+                  <text x="40" y="24" fontSize="11" fill="#ff4b4b">Inflated Value (No Correction)</text>
+                  
+                  <line x1="0" y1="40" x2="30" y2="40" stroke="#21c354" strokeWidth="2.5" />
+                  <text x="40" y="44" fontSize="11" fill="#21c354">Correct Model (−½σ²)</text>
+                </g>
+
+                {/* Axes */}
+                <line x1={margin.left} y1={margin.top + plotHeight} x2={margin.left + plotWidth} y2={margin.top + plotHeight}
+                  stroke="#333" strokeWidth="1.5" />
+                <line x1={margin.left} y1={margin.top} x2={margin.left} y2={margin.top + plotHeight}
+                  stroke="#333" strokeWidth="1.5" />
+
+                {/* X-axis label */}
+                <text x={margin.left + plotWidth / 2} y={height - 10} textAnchor="middle" fontSize="13" fill="#333">
+                  Time (Years)
+                </text>
+
+                {/* Y-axis label */}
+                <text x={15} y={margin.top + plotHeight / 2} textAnchor="middle" fontSize="13" fill="#333"
+                  transform={`rotate(-90, 15, ${margin.top + plotHeight / 2})`}>
+                  Stock Price
+                </text>
+
+                {/* Axis ticks */}
+                {[0.2, 0.4, 0.6, 0.8, 1.0].filter(t => t <= T).map(t => (
+                  <text key={`tick-x-${t}`} x={scaleX(t)} y={margin.top + plotHeight + 18} textAnchor="middle" fontSize="10" fill="#666">
+                    {t.toFixed(1)}
+                  </text>
+                ))}
+
+                {/* Y-axis ticks */}
+                {(() => {
+                  const rng = yMax - yMin;
+                  const step = rng < 20 ? 5 : rng < 50 ? 10 : rng < 200 ? 25 : 50;
+                  const ticks = [];
+                  for (let v = Math.ceil(yMin / step) * step; v <= yMax; v += step) ticks.push(v);
+                  return ticks.map(v => (
+                    <text key={`tick-y-${v}`} x={margin.left - 8} y={scaleY(v) + 4} textAnchor="end" fontSize="10" fill="#666">{v.toFixed(0)}</text>
+                  ));
+                })()}
+              </svg>
+            </div>
+
+            {/* Results Metrics */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginBottom: '20px' }}>
+              <div style={{
+                backgroundColor: 'white', borderRadius: '12px', padding: '20px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #e8e8e8', textAlign: 'center'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>Target Expected Value</div>
+                <div style={{ fontSize: '28px', fontWeight: 700, color: '#333' }}>${finalTarget.toFixed(2)}</div>
+                <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>S₀ × e<sup>rT</sup></div>
+              </div>
+              
+              <div style={{
+                backgroundColor: '#fff5f5', borderRadius: '12px', padding: '20px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #fecaca', textAlign: 'center'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>Inflated Value</div>
+                <div style={{ fontSize: '28px', fontWeight: 700, color: '#ff4b4b' }}>${finalNaive.toFixed(2)}</div>
+                <div style={{ fontSize: '11px', color: '#ff4b4b', marginTop: '4px', fontWeight: 600 }}>
+                  ↑ {(finalNaive - finalTarget).toFixed(2)} (Too High)
+                </div>
+              </div>
+              
+              <div style={{
+                backgroundColor: '#f0fdf4', borderRadius: '12px', padding: '20px',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #bbf7d0', textAlign: 'center'
+              }}>
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>Correct Model Avg</div>
+                <div style={{ fontSize: '28px', fontWeight: 700, color: '#21c354' }}>${finalCorrect.toFixed(2)}</div>
+                <div style={{ fontSize: '11px', color: '#21c354', marginTop: '4px', fontWeight: 600 }}>
+                  {(finalCorrect - finalTarget) >= 0 ? '↑' : '↓'} {Math.abs(finalCorrect - finalTarget).toFixed(2)} (On Target)
+                </div>
+              </div>
+            </div>
+
+            {/* Explanation */}
+            <div style={{
+              backgroundColor: '#eff6ff', borderRadius: '12px', padding: '20px 24px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: '1px solid #bfdbfe'
+            }}>
+              <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#1e40af', marginBottom: '12px' }}>
+                Why Is the Value Inflated?
+              </h3>
+              <p style={{ fontSize: '13px', color: '#1e3a8a', lineHeight: 1.6, margin: 0 }}>
+                When we put r directly in the exponent and add randomness σW<sub>t</sub>, Jensen's inequality inflates the expected value 
+                by e<sup>σ²T/2</sup> = e<sup>{(0.5 * sigma * sigma * T).toFixed(4)}</sup> = {Math.exp(0.5 * sigma * sigma * T).toFixed(4)}. 
+                Without the correction, the model produces E[S<sub>T</sub>] = S₀e<sup>rT + σ²T/2</sup> instead of S₀e<sup>rT</sup>. 
+                The correction term −½σ² cancels this inflation exactly.
+              </p>
+              <p style={{ fontSize: '13px', color: '#1e3a8a', lineHeight: 1.6, marginTop: '12px', marginBottom: 0, fontStyle: 'italic' }}>
+                Try increasing σ or T — both make the red line diverge further from the target, since the inflation factor is e<sup>σ²T/2</sup>. 
+                Time and volatility are interchangeable in amplifying Jensen's effect.
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // ==================== MAIN APP WITH TABS ====================
+    const App = () => {
+      const [activeTab, setActiveTab] = useState('jensen');
+
+      return (
+        <div>
+          <div style={{ 
+            display: 'flex', justifyContent: 'center', gap: '4px',
+            padding: '16px', backgroundColor: 'white', borderBottom: '1px solid #e8e8e8',
+            position: 'sticky', top: 0, zIndex: 100
+          }}>
+            <button 
+              className={`tab-button ${activeTab === 'jensen' ? 'active' : ''}`}
+              onClick={() => setActiveTab('jensen')}
+              style={{ borderRadius: '8px 0 0 8px' }}
+            >
+              Jensen's Inequality
+            </button>
+            <button 
+              className={`tab-button ${activeTab === 'gbm' ? 'active' : ''}`}
+              onClick={() => setActiveTab('gbm')}
+              style={{ borderRadius: '0 8px 8px 0' }}
+            >
+              GBM Simulation
+            </button>
+          </div>
+
+          {activeTab === 'jensen' ? <JensenVisualization /> : <GBMSimulation />}
+        </div>
+      );
+    };
+
+    ReactDOM.render(<App />, document.getElementById('root'));
   </script>
 </body>
 </html>
